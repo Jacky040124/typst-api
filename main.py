@@ -4,6 +4,7 @@ Accepts YAML content via POST, generates PDF, uploads to Supabase Storage.
 Returns JSON with public URL and processing logs.
 """
 
+import io
 import os
 import tempfile
 import uuid
@@ -138,9 +139,9 @@ def generate_resume():
 
                 # Upload to Supabase Storage
                 supabase.storage.from_(SUPABASE_BUCKET).upload(
-                    file_path,
-                    pdf_bytes,
-                    file_options={"content-type": "application/pdf"}
+                    path=file_path,
+                    file=pdf_bytes,
+                    file_options={"contentType": "application/pdf"}
                 )
 
                 # Generate public URL
