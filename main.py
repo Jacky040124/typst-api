@@ -4,15 +4,14 @@ Accepts YAML content via POST, generates PDF, uploads to Supabase Storage.
 Returns JSON with public URL and processing logs.
 """
 
-import io
 import os
 import tempfile
 import uuid
 from pathlib import Path
 from flask import Flask, request, jsonify
+import requests as http_requests
 
 import typst
-from supabase import create_client, Client
 
 app = Flask(__name__)
 
@@ -22,11 +21,24 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "resumes")
 
 
-def get_supabase_client() -> Client | None:
-    """Create Supabase client if credentials are configured."""
-    if SUPABASE_URL and SUPABASE_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
-    return None
+def upload_to_supabase(file_bytes: bytes, file_path: str) -> str:
+    """Upload file to Supabase Storage using REST API. Returns public URL."""
+    upload_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
+
+    response = http_requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/pdf",
+        },
+        data=file_bytes,
+        timeout=60
+    )
+
+    if response.status_code not in (200, 201):
+        raise Exception(f"Upload failed ({response.status_code}): {response.text}")
+
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
 
 # Hardcoded API URL for self-reference (not needed but kept for clarity)
 API_URL = "https://typst-api-production.up.railway.app"
@@ -124,8 +136,7 @@ def generate_resume():
                 return jsonify({"success": False, "error": f"Typst compilation failed: {str(e)}", "logs": logs}), 500
 
             # Step 4: Upload to Supabase Storage
-            supabase = get_supabase_client()
-            if not supabase:
+            if not SUPABASE_URL or not SUPABASE_KEY:
                 logs.append("ERROR: Supabase not configured")
                 return jsonify({
                     "success": False,
@@ -135,18 +146,10 @@ def generate_resume():
 
             try:
                 file_id = str(uuid.uuid4())
-                file_path = f"{file_id}.pdf"
+                file_name = f"{file_id}.pdf"
 
-                # Upload to Supabase Storage
-                supabase.storage.from_(SUPABASE_BUCKET).upload(
-                    path=file_path,
-                    file=pdf_bytes,
-                    file_options={"contentType": "application/pdf"}
-                )
-
-                # Generate public URL
-                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
-                logs.append(f"Uploaded to Supabase: {file_path}")
+                public_url = upload_to_supabase(pdf_bytes, file_name)
+                logs.append(f"Uploaded to Supabase: {file_name}")
 
                 return jsonify({
                     "success": True,
