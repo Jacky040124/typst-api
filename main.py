@@ -4,6 +4,8 @@ Accepts Typst markup via POST and returns compiled PDF.
 """
 
 import os
+import tempfile
+from pathlib import Path
 from flask import Flask, request, Response
 
 import typst
@@ -32,14 +34,20 @@ def compile_typst():
         if not typst_content:
             return {"error": "No content provided"}, 400
 
-        # Compile to PDF using typst-py
-        pdf_bytes = typst.compile(typst_content)
+        # Write to temporary file (typst.compile expects a file path)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            typst_file = temp_path / "input.typ"
+            typst_file.write_text(typst_content, encoding="utf-8")
 
-        return Response(
-            pdf_bytes,
-            mimetype="application/pdf",
-            headers={"Content-Disposition": "inline; filename=output.pdf"}
-        )
+            # Compile to PDF using typst-py
+            pdf_bytes = typst.compile(typst_file)
+
+            return Response(
+                pdf_bytes,
+                mimetype="application/pdf",
+                headers={"Content-Disposition": "inline; filename=output.pdf"}
+            )
 
     except Exception as e:
         error_msg = str(e)
