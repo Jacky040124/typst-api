@@ -1,16 +1,31 @@
 """
 RenderCV API - Full resume generation pipeline.
-Accepts YAML content via POST and returns compiled PDF.
+Accepts YAML content via POST, generates PDF, uploads to Supabase Storage.
+Returns JSON with public URL and processing logs.
 """
 
 import os
 import tempfile
+import uuid
 from pathlib import Path
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, jsonify
 
 import typst
+from supabase import create_client, Client
 
 app = Flask(__name__)
+
+# Supabase configuration from environment variables
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "resumes")
+
+
+def get_supabase_client() -> Client | None:
+    """Create Supabase client if credentials are configured."""
+    if SUPABASE_URL and SUPABASE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return None
 
 # Hardcoded API URL for self-reference (not needed but kept for clarity)
 API_URL = "https://typst-api-production.up.railway.app"
@@ -28,8 +43,10 @@ def generate_resume():
     Generate PDF resume from YAML content.
 
     Accepts: application/json or text/plain with YAML content
-    Returns: application/pdf on success, JSON error on failure
+    Returns: JSON with success status, PDF URL, and processing logs
     """
+    logs = []
+
     try:
         # Get YAML content from request
         content_type = request.content_type or ""
@@ -43,7 +60,10 @@ def generate_resume():
             theme = request.args.get("theme", "classic")
 
         if not yaml_content:
-            return jsonify({"error": "No YAML content provided"}), 400
+            return jsonify({"success": False, "error": "No YAML content provided", "logs": logs}), 400
+
+        logs.append(f"Received YAML ({len(yaml_content)} chars)")
+        logs.append(f"Theme: {theme}")
 
         # Clean up markdown code block markers if present
         yaml_content = clean_yaml_content(yaml_content)
@@ -56,7 +76,8 @@ def generate_resume():
             from rendercv.renderer.typst import generate_typst
             from rendercv.exception import RenderCVUserValidationError
         except ImportError as e:
-            return jsonify({"error": f"RenderCV import failed: {str(e)}"}), 500
+            logs.append(f"ERROR: RenderCV import failed: {str(e)}")
+            return jsonify({"success": False, "error": f"RenderCV import failed: {str(e)}", "logs": logs}), 500
 
         # Create temporary directory for processing
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -76,36 +97,73 @@ def generate_resume():
                     dont_generate_html=True,
                     dont_generate_markdown=True,
                 )
+                logs.append(f"Built RenderCV model: {rendercv_model.cv.name}")
             except RenderCVUserValidationError as e:
                 errors = format_validation_errors(e.validation_errors)
-                return jsonify({"error": f"YAML validation failed: {errors}"}), 400
+                logs.append(f"ERROR: YAML validation failed: {errors}")
+                return jsonify({"success": False, "error": f"YAML validation failed: {errors}", "logs": logs}), 400
             except Exception as e:
-                return jsonify({"error": f"Model build failed: {str(e)}"}), 400
+                logs.append(f"ERROR: Model build failed: {str(e)}")
+                return jsonify({"success": False, "error": f"Model build failed: {str(e)}", "logs": logs}), 400
 
             # Step 2: Generate Typst file
             try:
                 typst_path = generate_typst(rendercv_model)
+                logs.append("Generated Typst file")
             except Exception as e:
-                return jsonify({"error": f"Typst generation failed: {str(e)}"}), 500
+                logs.append(f"ERROR: Typst generation failed: {str(e)}")
+                return jsonify({"success": False, "error": f"Typst generation failed: {str(e)}", "logs": logs}), 500
 
             # Step 3: Compile Typst to PDF
             try:
                 pdf_bytes = typst.compile(typst_path)
+                logs.append(f"Compiled PDF ({len(pdf_bytes)} bytes)")
             except Exception as e:
-                return jsonify({"error": f"Typst compilation failed: {str(e)}"}), 500
+                logs.append(f"ERROR: Typst compilation failed: {str(e)}")
+                return jsonify({"success": False, "error": f"Typst compilation failed: {str(e)}", "logs": logs}), 500
 
-            # Return PDF
-            filename = f"{rendercv_model.cv.name}_CV.pdf"
-            return Response(
-                pdf_bytes,
-                mimetype="application/pdf",
-                headers={
-                    "Content-Disposition": f'attachment; filename="{filename}"'
-                }
-            )
+            # Step 4: Upload to Supabase Storage
+            supabase = get_supabase_client()
+            if not supabase:
+                logs.append("ERROR: Supabase not configured")
+                return jsonify({
+                    "success": False,
+                    "error": "Supabase storage not configured. Set SUPABASE_URL and SUPABASE_KEY environment variables.",
+                    "logs": logs
+                }), 500
+
+            try:
+                file_id = str(uuid.uuid4())
+                file_path = f"{file_id}.pdf"
+
+                # Upload to Supabase Storage
+                supabase.storage.from_(SUPABASE_BUCKET).upload(
+                    file_path,
+                    pdf_bytes,
+                    file_options={"content-type": "application/pdf"}
+                )
+
+                # Generate public URL
+                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
+                logs.append(f"Uploaded to Supabase: {file_path}")
+
+                return jsonify({
+                    "success": True,
+                    "url": public_url,
+                    "logs": logs
+                })
+
+            except Exception as e:
+                logs.append(f"ERROR: Supabase upload failed: {str(e)}")
+                return jsonify({
+                    "success": False,
+                    "error": f"Supabase upload failed: {str(e)}",
+                    "logs": logs
+                }), 500
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logs.append(f"ERROR: Unexpected error: {str(e)}")
+        return jsonify({"success": False, "error": str(e), "logs": logs}), 500
 
 
 def clean_yaml_content(yaml_content: str) -> str:
