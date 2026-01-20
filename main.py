@@ -15,10 +15,10 @@ import typst
 
 app = Flask(__name__)
 
-# Supabase configuration from environment variables
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "resumes")
+# Supabase configuration from environment variables (strip whitespace from values)
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
+SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip().replace("\n", "").replace(" ", "")
+SUPABASE_BUCKET = (os.environ.get("SUPABASE_BUCKET") or "resumes").strip()
 
 
 def upload_to_supabase(file_bytes: bytes, file_path: str) -> str:
